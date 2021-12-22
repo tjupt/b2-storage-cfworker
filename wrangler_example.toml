@@ -1,0 +1,9 @@
+name = "b2-storage-cfworker"
+type = "javascript"
+account_id = ""
+workers_dev = true
+route = ""
+zone_id = ""
+kv_namespaces = [
+  { binding = "B2KV", id = "", preview_id = "" }
+]

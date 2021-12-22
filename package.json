@@ -1,0 +1,23 @@
+{
+  "private": true,
+  "name": "b2-storage-cfworker",
+  "version": "1.0.0",
+  "description": "A download/upload wrapper for b2 storage based on cloudflare worker",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "npm run format && webpack --progress",
+    "format": "prettier --write '**/*.{js,css,json,md}'"
+  },
+  "author": "tongyifan <tongyfan@gmail.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "dotenv-webpack": "^7.0.3",
+    "prettier": "^1.18.2",
+    "webpack": "^5.65.0",
+    "webpack-cli": "^4.9.1"
+  },
+  "dependencies": {
+    "backblaze-b2": "^1.7.0",
+    "md5": "^2.3.0"
+  }
+}

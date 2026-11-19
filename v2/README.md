@@ -24,14 +24,19 @@ wrangler kv namespace create BLOCKED
 ```bash
 wrangler secret put B2_KEY_ID       # 新桶只读密钥 ID
 wrangler secret put B2_APP_KEY      # 新桶只读密钥 Application Key
-wrangler secret put SALT            # 等于主站 $SECRET_SALT
+wrangler secret put SALT            # 附件签名密钥，等于站点设置 ATTACHMENT 段的 b2v2_sign_key（不是 $SECRET_SALT）
 ```
 
 ### 3. 部署
 
+`files.tju.pt` 已经在控制台绑在这个 Worker 上。只有单个 Worker 权限的成员改不了自定义域名，`wrangler deploy` 会在同步域名那一步报 "No access to the specified resource"（代码其实已经上传）。所以用版本命令部署，不碰域名：
+
 ```bash
-wrangler deploy
+wrangler versions upload
+wrangler versions deploy --yes   # 把刚上传的版本切到 100%
 ```
+
+有账号级 Workers 权限和 `tju.pt` 的 Workers Routes Write 的人，也可以直接 `wrangler deploy`。
 
 ### 4. 部署后验证
 
@@ -44,7 +49,7 @@ wrangler deploy
    ```
    curl -I "https://files.tju.pt/test.pdf?file_id=<sha256>"
    ```
-4. 用主站算出的签名（`md5(ts + file_id + SALT)`）应能下载：
+4. 用 SALT 算出的签名（`md5(ts + file_id + SALT)`）应能下载：
    ```
    curl -o /tmp/test.pdf "https://files.tju.pt/test.pdf?file_id=<sha256>&ts=<ts>&sign=<sign>"
    ```

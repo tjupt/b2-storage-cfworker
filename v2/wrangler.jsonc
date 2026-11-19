@@ -1,7 +1,8 @@
 {
-  "name": "tjupt-files",
+  "name": "b2-storage-cfworker",
   "compatibility_date": "2024-09-23",
   "main": "src/index.js",
+  // 域名已在控制台绑好；这里留着是为了记录，部署用 `wrangler versions upload` + `versions deploy`，不改域名（见 README）
   "routes": [
     { "pattern": "files.tju.pt", "custom_domain": true }
   ],
@@ -13,6 +14,6 @@
     "BROWSER_MAX_AGE": "31536000"
   },
   "kv_namespaces": [
-    { "binding": "BLOCKED", "id": "PLACEHOLDER_FILL_BEFORE_DEPLOY" }
+    { "binding": "BLOCKED", "id": "012ef3f688ab4f3794c05358c860a775" }
   ]
 }

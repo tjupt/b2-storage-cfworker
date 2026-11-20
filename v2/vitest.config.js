@@ -6,8 +6,8 @@ export default defineWorkersConfig({
       workers: {
         wrangler: { configPath: './wrangler.jsonc' },
         miniflare: {
-          // BLOCKED 绑定可选：测试里按需覆盖
-          kvNamespaces: ['BLOCKED'],
+          // FILE_POLICY KV 绑定：测试里按需操作
+          kvNamespaces: ['FILE_POLICY'],
           bindings: {
             B2_KEY_ID: 'test-key-id',
             B2_APP_KEY: 'test-app-key',

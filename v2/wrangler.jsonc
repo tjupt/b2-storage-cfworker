@@ -14,6 +14,6 @@
     "BROWSER_MAX_AGE": "31536000"
   },
   "kv_namespaces": [
-    { "binding": "BLOCKED", "id": "012ef3f688ab4f3794c05358c860a775" }
+    { "binding": "FILE_POLICY", "id": "012ef3f688ab4f3794c05358c860a775" }
   ]
 }

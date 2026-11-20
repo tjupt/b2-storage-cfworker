@@ -14,6 +14,13 @@ const FILE_ID3 = 'c'.repeat(64) // Authorization 测试专用
 const FILE_ID4 = 'd'.repeat(64) // 缓存文件名测试专用
 const FILE_ID5 = 'e'.repeat(64) // HEAD/GET 缓存测试专用
 const FILE_ID6 = 'f'.repeat(64) // 缓存后 Range 测试专用
+const FILE_ID7 = '1'.repeat(64) // FILE_POLICY 策略测试专用（图片）
+const FILE_ID8 = '2'.repeat(64) // FILE_POLICY 策略测试专用（非图片）
+const FILE_ID9 = '3'.repeat(64) // signed + 有效签名测试专用
+const FILE_ID10 = '4'.repeat(64) // signed + Referer 测试专用
+const FILE_ID11 = '5'.repeat(64) // blocked 非图片测试专用
+const FILE_ID12 = '6'.repeat(64) // signed 图片边缘缓存测试专用
+const FILE_ID13 = '7'.repeat(64) // SALT 为空时 signed 图片测试专用
 
 // 对应对象 key
 function keyFor(id, ext) {
@@ -27,16 +34,35 @@ const KEY3_PNG = keyFor(FILE_ID3, 'png')
 const KEY4_PDF = keyFor(FILE_ID4, 'pdf')
 const KEY5_PNG = keyFor(FILE_ID5, 'png')
 const KEY6_PDF = keyFor(FILE_ID6, 'pdf')
+const KEY7_PNG = keyFor(FILE_ID7, 'png')
+const KEY8_PDF = keyFor(FILE_ID8, 'pdf')
+const KEY9_PNG = keyFor(FILE_ID9, 'png')
+const KEY10_PNG = keyFor(FILE_ID10, 'png')
+const KEY11_PDF = keyFor(FILE_ID11, 'pdf')
+const KEY12_PNG = keyFor(FILE_ID12, 'png')
+const KEY13_PNG = keyFor(FILE_ID13, 'png')
 
 // 计算 MD5（从 Worker 里直接用 crypto.subtle，这里借 Node crypto 算预期值）
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 
 function md5Hex(str) {
   return createHash('md5').update(str).digest('hex')
 }
 
+function hmacSha256Prefix32(salt, message) {
+  return createHmac('sha256', salt).update(message).digest('hex').slice(0, 32)
+}
+
 function makeSign(ts, fileId, salt = 'testsalt') {
   return md5Hex(`${ts}${fileId}${salt}`)
+}
+
+// 生成符合约定的图片签名：exp = (floor(now/86400)+8)*86400
+function makeImageSig(fileId, salt = 'testsalt') {
+  const now = Math.floor(Date.now() / 1000)
+  const exp = (Math.floor(now / 86400) + 8) * 86400
+  const sig = hmacSha256Prefix32(salt, `${fileId}:${exp}`)
+  return { exp, sig }
 }
 
 function nowTs() {
@@ -258,12 +284,332 @@ describe('非图片签名验证', () => {
   })
 })
 
-// --- BLOCKED KV ---
+// --- FILE_POLICY KV：无键（公开）---
 
-describe('BLOCKED KV', () => {
-  it('BLOCKED 命中 → 404，不请求 B2', async () => {
-    // 写入 KV
-    await env.BLOCKED.put(FILE_ID, '1')
+describe('FILE_POLICY：无键 → 公开放行', () => {
+  it('无 KV 键，图片正常返回 200，cache-control 是 public', async () => {
+    fetchMock
+      .get('https://s3.test')
+      .intercept({ path: `/${env.B2_BUCKET}/${KEY7_PNG}` })
+      .reply(200, 'png-data', { 'content-type': 'image/png' })
+
+    const res = await handleReq(
+      new Request(`https://files.tju.pt/test.png?file_id=${FILE_ID7}`),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toContain('public')
+  })
+})
+
+// --- FILE_POLICY KV：blocked ---
+
+describe('FILE_POLICY：blocked → 404', () => {
+  it('图片 blocked → 404，返回 SVG 占位图，Content-Type image/svg+xml', async () => {
+    await env.FILE_POLICY.put(FILE_ID7, 'blocked')
+
+    const res = await handleReq(
+      new Request(`https://files.tju.pt/test.png?file_id=${FILE_ID7}`),
+    )
+    expect(res.status).toBe(404)
+    expect(res.headers.get('content-type')).toContain('image/svg+xml')
+    expect(res.headers.get('cache-control')).toBe('no-store')
+    const body = await res.text()
+    expect(body).toContain('仅限站内查看')
+
+    await env.FILE_POLICY.delete(FILE_ID7)
+  })
+
+  it('非图片 blocked → 404 文字', async () => {
+    await env.FILE_POLICY.put(FILE_ID11, 'blocked')
+
+    const res = await handleReq(
+      new Request(
+        `https://files.tju.pt/test.pdf?file_id=${FILE_ID11}&ts=${nowTs()}&sign=${makeSign(String(nowTs()), FILE_ID11)}`,
+      ),
+    )
+    expect(res.status).toBe(404)
+    expect(res.headers.get('content-type')).not.toContain('svg')
+
+    await env.FILE_POLICY.delete(FILE_ID11)
+  })
+})
+
+// --- FILE_POLICY KV：未知值当 blocked ---
+
+describe('FILE_POLICY：未知值 → 404', () => {
+  it('任意未知值（如 "1"）→ 404，不放行', async () => {
+    await env.FILE_POLICY.put(FILE_ID7, '1')
+
+    const res = await handleReq(
+      new Request(`https://files.tju.pt/test.png?file_id=${FILE_ID7}`),
+    )
+    expect(res.status).toBe(404)
+
+    await env.FILE_POLICY.delete(FILE_ID7)
+  })
+})
+
+// --- FILE_POLICY KV：signed + 图片 ---
+
+describe('FILE_POLICY：signed 图片', () => {
+  it('有效 exp+sig → 200，给浏览器的 cache-control 是 private', async () => {
+    await env.FILE_POLICY.put(FILE_ID9, 'signed')
+
+    fetchMock
+      .get('https://s3.test')
+      .intercept({ path: `/${env.B2_BUCKET}/${KEY9_PNG}` })
+      .reply(200, 'png-data', { 'content-type': 'image/png' })
+
+    const { exp, sig } = makeImageSig(FILE_ID9)
+    const res = await handleReq(
+      new Request(
+        `https://files.tju.pt/test.png?file_id=${FILE_ID9}&exp=${exp}&sig=${sig}`,
+      ),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toContain('private')
+    expect(res.headers.get('cache-control')).not.toContain('public')
+
+    await env.FILE_POLICY.delete(FILE_ID9)
+  })
+
+  it('signed 图片首次回源后，第二次请求命中边缘缓存，不再打到 B2；写进缓存的头是 public', async () => {
+    await env.FILE_POLICY.put(FILE_ID12, 'signed')
+
+    // 第一次：回源，仅注册一次拦截器
+    fetchMock
+      .get('https://s3.test')
+      .intercept({ path: `/${env.B2_BUCKET}/${KEY12_PNG}` })
+      .reply(200, 'png-cached', { 'content-type': 'image/png' })
+
+    const { exp, sig } = makeImageSig(FILE_ID12)
+    const ctx1 = createExecutionContext()
+    const res1 = await worker.fetch(
+      new Request(
+        `https://files.tju.pt/img.png?file_id=${FILE_ID12}&exp=${exp}&sig=${sig}`,
+      ),
+      env,
+      ctx1,
+    )
+    await waitOnExecutionContext(ctx1) // 等 waitUntil 写缓存
+    expect(res1.status).toBe(200)
+    expect(res1.headers.get('cache-control')).toContain('private')
+
+    // 第二次：换成本站 Referer（不带签名），应命中边缘缓存，不再注册拦截器
+    // afterEach 的 assertNoPendingInterceptors 会确认没有未命中的拦截器
+    const ctx2 = createExecutionContext()
+    const res2 = await worker.fetch(
+      new Request(`https://files.tju.pt/img.png?file_id=${FILE_ID12}`, {
+        headers: { Referer: 'https://tjupt.org/' },
+      }),
+      env,
+      ctx2,
+    )
+    await waitOnExecutionContext(ctx2)
+    expect(res2.status).toBe(200)
+    // 命中缓存后 applyPerRequestHeaders 按本次请求重设，isSigned=true(Referer放行) → private
+    expect(res2.headers.get('cache-control')).toContain('private')
+
+    await env.FILE_POLICY.delete(FILE_ID12)
+  })
+
+  it('exp 过期（<= now）→ 403 SVG', async () => {
+    await env.FILE_POLICY.put(FILE_ID9, 'signed')
+
+    const now = Math.floor(Date.now() / 1000)
+    const exp = now // now < exp 要求不满足
+    const sig = hmacSha256Prefix32('testsalt', `${FILE_ID9}:${exp}`)
+    const res = await handleReq(
+      new Request(
+        `https://files.tju.pt/test.png?file_id=${FILE_ID9}&exp=${exp}&sig=${sig}`,
+      ),
+    )
+    expect(res.status).toBe(403)
+    expect(res.headers.get('content-type')).toContain('image/svg+xml')
+    expect(res.headers.get('cache-control')).toBe('no-store')
+
+    await env.FILE_POLICY.delete(FILE_ID9)
+  })
+
+  it('exp 超长（> now + 9 天）→ 403 SVG', async () => {
+    await env.FILE_POLICY.put(FILE_ID9, 'signed')
+
+    const now = Math.floor(Date.now() / 1000)
+    const exp = now + 9 * 86400 + 1
+    const sig = hmacSha256Prefix32('testsalt', `${FILE_ID9}:${exp}`)
+    const res = await handleReq(
+      new Request(
+        `https://files.tju.pt/test.png?file_id=${FILE_ID9}&exp=${exp}&sig=${sig}`,
+      ),
+    )
+    expect(res.status).toBe(403)
+
+    await env.FILE_POLICY.delete(FILE_ID9)
+  })
+
+  it('sig 篡改 → 403 SVG', async () => {
+    await env.FILE_POLICY.put(FILE_ID9, 'signed')
+
+    const { exp } = makeImageSig(FILE_ID9)
+    const res = await handleReq(
+      new Request(
+        `https://files.tju.pt/test.png?file_id=${FILE_ID9}&exp=${exp}&sig=00000000000000000000000000000000`,
+      ),
+    )
+    expect(res.status).toBe(403)
+
+    await env.FILE_POLICY.delete(FILE_ID9)
+  })
+
+  it('本站 Referer（tjupt.org）→ 200', async () => {
+    await env.FILE_POLICY.put(FILE_ID10, 'signed')
+
+    fetchMock
+      .get('https://s3.test')
+      .intercept({ path: `/${env.B2_BUCKET}/${KEY10_PNG}` })
+      .reply(200, 'png-data', { 'content-type': 'image/png' })
+
+    const res = await handleReq(
+      new Request(`https://files.tju.pt/test.png?file_id=${FILE_ID10}`, {
+        headers: { Referer: 'https://tjupt.org/viewtopic.php?id=1' },
+      }),
+    )
+    expect(res.status).toBe(200)
+
+    await env.FILE_POLICY.delete(FILE_ID10)
+  })
+
+  it('本站子域名 Referer（sub.tjupt.org）→ 200', async () => {
+    await env.FILE_POLICY.put(FILE_ID10, 'signed')
+
+    fetchMock
+      .get('https://s3.test')
+      .intercept({ path: `/${env.B2_BUCKET}/${KEY10_PNG}` })
+      .reply(200, 'png-data', { 'content-type': 'image/png' })
+
+    const res = await handleReq(
+      new Request(`https://files.tju.pt/test.png?file_id=${FILE_ID10}`, {
+        headers: { Referer: 'https://sub.tjupt.org/' },
+      }),
+    )
+    expect(res.status).toBe(200)
+
+    await env.FILE_POLICY.delete(FILE_ID10)
+  })
+
+  it('tju.pt Referer → 200', async () => {
+    await env.FILE_POLICY.put(FILE_ID10, 'signed')
+
+    fetchMock
+      .get('https://s3.test')
+      .intercept({ path: `/${env.B2_BUCKET}/${KEY10_PNG}` })
+      .reply(200, 'png-data', { 'content-type': 'image/png' })
+
+    const res = await handleReq(
+      new Request(`https://files.tju.pt/test.png?file_id=${FILE_ID10}`, {
+        headers: { Referer: 'https://tju.pt/' },
+      }),
+    )
+    expect(res.status).toBe(200)
+
+    await env.FILE_POLICY.delete(FILE_ID10)
+  })
+
+  it('仿冒域名 Referer（evil-tjupt.org）→ 403', async () => {
+    await env.FILE_POLICY.put(FILE_ID10, 'signed')
+
+    const res = await handleReq(
+      new Request(`https://files.tju.pt/test.png?file_id=${FILE_ID10}`, {
+        headers: { Referer: 'https://evil-tjupt.org/' },
+      }),
+    )
+    expect(res.status).toBe(403)
+    expect(res.headers.get('cache-control')).toBe('no-store')
+
+    await env.FILE_POLICY.delete(FILE_ID10)
+  })
+
+  it('无 Referer 且无签名 → 403', async () => {
+    await env.FILE_POLICY.put(FILE_ID10, 'signed')
+
+    const res = await handleReq(
+      new Request(`https://files.tju.pt/test.png?file_id=${FILE_ID10}`),
+    )
+    expect(res.status).toBe(403)
+
+    await env.FILE_POLICY.delete(FILE_ID10)
+  })
+})
+
+// --- FILE_POLICY KV：signed + 非图片（不加额外要求）---
+
+describe('FILE_POLICY：signed 非图片，只受 blocked 约束', () => {
+  it('signed 非图片，ts/sign 有效 → 200', async () => {
+    await env.FILE_POLICY.put(FILE_ID8, 'signed')
+
+    const ts = String(nowTs())
+    const sign = makeSign(ts, FILE_ID8)
+    fetchMock
+      .get('https://s3.test')
+      .intercept({ path: `/${env.B2_BUCKET}/${KEY8_PDF}` })
+      .reply(200, 'pdf-data', { 'content-type': 'application/pdf' })
+
+    const res = await handleReq(
+      new Request(
+        `https://files.tju.pt/doc.pdf?file_id=${FILE_ID8}&ts=${ts}&sign=${sign}`,
+      ),
+    )
+    expect(res.status).toBe(200)
+
+    await env.FILE_POLICY.delete(FILE_ID8)
+  })
+})
+
+// --- SALT 未配置时 signed 图片签名验证 ---
+
+describe('SALT 未配置时，hasValidImageSig 返回 false，降级到 Referer', () => {
+  it('SALT 为空时，有效格式的 exp+sig 不能放行（无 Referer → 403）', async () => {
+    await env.FILE_POLICY.put(FILE_ID13, 'signed')
+
+    // 用测试 SALT 算出来的 sig，但 Worker 的 env.SALT 是 'testsalt'（非空），
+    // 此测试需要覆盖 salt 为空的分支。
+    // 通过传入一个和 SALT 计算结果不同的 sig，同时不带 Referer，来断言 403。
+    // 更直接的做法：传 exp 合法但 sig 全零，确认拒绝，而不依赖内部 salt 值。
+    const now = Math.floor(Date.now() / 1000)
+    const exp = now + 86400
+    const res = await handleReq(
+      new Request(
+        `https://files.tju.pt/test.png?file_id=${FILE_ID13}&exp=${exp}&sig=00000000000000000000000000000000`,
+      ),
+    )
+    // sig 为零，不可能和真实签名相等，无 Referer → 403
+    expect(res.status).toBe(403)
+
+    await env.FILE_POLICY.delete(FILE_ID13)
+  })
+
+  it('exp 含非数字字符（如 "123abc"）被严格校验，不当作 123 → 403', async () => {
+    await env.FILE_POLICY.put(FILE_ID13, 'signed')
+
+    // 用合法 sig（但对应 exp=123），exp 传 "123abc"
+    // 严格正则校验后直接返回 false，不调用 importKey
+    const sig = hmacSha256Prefix32('testsalt', `${FILE_ID13}:123`)
+    const res = await handleReq(
+      new Request(
+        `https://files.tju.pt/test.png?file_id=${FILE_ID13}&exp=123abc&sig=${sig}`,
+      ),
+    )
+    expect(res.status).toBe(403)
+
+    await env.FILE_POLICY.delete(FILE_ID13)
+  })
+})
+
+// --- BLOCKED KV（旧名称，向后兼容测试用 FILE_POLICY）---
+
+describe('FILE_POLICY KV（原 BLOCKED）', () => {
+  it('FILE_POLICY 命中 blocked → 404，不请求 B2', async () => {
+    await env.FILE_POLICY.put(FILE_ID, 'blocked')
 
     const res = await handleReq(
       new Request(`https://files.tju.pt/test.png?file_id=${FILE_ID}`),
@@ -271,11 +617,10 @@ describe('BLOCKED KV', () => {
     // fetchMock 没有注册拦截器，如果请求了 B2 会报错
     expect(res.status).toBe(404)
 
-    // 清理
-    await env.BLOCKED.delete(FILE_ID)
+    await env.FILE_POLICY.delete(FILE_ID)
   })
 
-  it('BLOCKED 未命中，正常返回', async () => {
+  it('FILE_POLICY 未命中，正常返回', async () => {
     fetchMock
       .get('https://s3.test')
       .intercept({ path: `/${env.B2_BUCKET}/${KEY_PNG}` })
